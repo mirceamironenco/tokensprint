@@ -45,18 +45,21 @@ class LLMEngine:
         if isinstance(prompt, str):
             prompt = self._tokenize_prompt(prompt)
 
-        sequence = Sequence(prompt, sampling_params)
+        sequence = Sequence(token_ids=prompt, sampling_params=sampling_params)
 
         self.scheduler.add_sequence(sequence)
 
     def step(self):
         seqs = self.scheduler.schedule()
+
         token_ids, seq_need_compute_logits = self.model_runner.run(seqs)
+
         self.scheduler.postprocess(seqs, token_ids, seq_need_compute_logits)
 
         outputs = [
             (seq.seq_id, seq.completion_token_ids) for seq in seqs if seq.is_finished
         ]
+
         num_total_tokens = sum(len(seq) for seq in seqs if seq.is_finished)
 
         return outputs, num_total_tokens
@@ -92,8 +95,8 @@ class LLMEngine:
         while not self.is_finished():
             output, num_step_tokens = self.step()
             num_total_tokens += num_step_tokens
-
             total_throughput = num_total_tokens / (time.perf_counter() - t)
+
             if use_tqdm:
                 pbar.set_postfix(
                     {

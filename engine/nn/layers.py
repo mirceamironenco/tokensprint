@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from enum import Enum
 from typing import Literal
 
@@ -29,16 +30,24 @@ class TiedProjectionLayer(nn.Module):
         return self.embed.weight
 
 
+@dataclass(kw_only=True)
+class FFNConfig:
+    model_dim: int
+    inner_dim: int | None = None
+    dim_multiplier: float = 1.0
+    multiple_of: int = 1
+    bias: bool = False
+
+
 class SwiGLUFFN(nn.Module):
-    def __init__(
-        self,
-        model_dim: int,
-        inner_dim: int | None = None,
-        dim_multiplier: float = 1.0,
-        multiple_of: int = 1,
-        bias: bool = False,
-    ) -> None:
+    def __init__(self, config: FFNConfig) -> None:
         super().__init__()
+
+        self.config = config
+        model_dim = config.model_dim
+        inner_dim = config.inner_dim
+        dim_multiplier = config.dim_multiplier
+        multiple_of = config.multiple_of
 
         if inner_dim is None:
             inner_dim = 4 * model_dim
@@ -49,9 +58,9 @@ class SwiGLUFFN(nn.Module):
         if multiple_of != 1:
             inner_dim = multiple_of * ((inner_dim + multiple_of - 1) // multiple_of)
 
-        self.gate_proj = Linear(model_dim, inner_dim, bias=bias)
-        self.up_proj = Linear(model_dim, inner_dim, bias=bias)
-        self.down_proj = Linear(inner_dim, model_dim, bias=bias)
+        self.gate_proj = Linear(model_dim, inner_dim, bias=config.bias)
+        self.up_proj = Linear(model_dim, inner_dim, bias=config.bias)
+        self.down_proj = Linear(inner_dim, model_dim, bias=config.bias)
 
     def forward(self, seqs: torch.Tensor) -> torch.Tensor:
         return self.down_proj(F.silu(self.gate_proj(seqs)) * self.up_proj(seqs))

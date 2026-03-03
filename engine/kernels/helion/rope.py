@@ -3,12 +3,15 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
+from engine.nn.rope import LLaMARoPEScaleConfig, build_rope_inv_freq
+
 try:
     import helion
     import helion.language as hl
-except ModuleNotFoundError:
-    helion = None
-    hl = None
+except ImportError:
+    _has_helion_installed_ = False
+else:
+    _has_helion_installed_ = True
 
 
 def _missing_helion_error() -> ModuleNotFoundError:
@@ -18,7 +21,7 @@ def _missing_helion_error() -> ModuleNotFoundError:
     )
 
 
-if helion is not None:
+if _has_helion_installed_:
 
     @helion.kernel(autotune_effort="none")
     def rope_kernel_exact(
@@ -32,7 +35,8 @@ if helion is not None:
 
         for elem_tile in hl.tile(n_elem):
             head_pos = pos[elem_tile].to(torch.float32)
-            angles = head_pos[:, None] * freqs[None, :].to(torch.float32)
+            freqs_half = freqs[:].to(torch.float32)
+            angles = head_pos[:, None] * freqs_half
             sines = torch.sin(angles)[:, None, :]
             cosines = torch.cos(angles)[:, None, :]
 
@@ -47,7 +51,6 @@ if helion is not None:
 
         return out
 
-
     @helion.kernel(autotune_effort="none")
     def rope_kernel_approx(
         x: torch.Tensor,
@@ -60,7 +63,8 @@ if helion is not None:
 
         for elem_tile in hl.tile(n_elem):
             head_pos = pos[elem_tile].to(torch.float32)
-            angles = head_pos[:, None] * freqs[None, :].to(torch.float32)
+            freqs_half = freqs[:].to(torch.float32)
+            angles = head_pos[:, None] * freqs_half
 
             sines, cosines = hl.inline_asm_elementwise(
                 asm="""
@@ -95,7 +99,6 @@ else:
         freqs: torch.Tensor,
     ) -> torch.Tensor:
         raise _missing_helion_error()
-
 
     def rope_kernel_approx(
         x: torch.Tensor,
@@ -154,6 +157,7 @@ class HelionRopeEncoding(nn.Module):
         dim: int,
         max_seq_len: int,
         rope_theta: float = 10000.0,
+        rope_scale: LLaMARoPEScaleConfig | None = None,
         approx_trigo: bool = False,
     ) -> None:
         super().__init__()
@@ -163,6 +167,7 @@ class HelionRopeEncoding(nn.Module):
         self.dim = dim
         self.max_seq_len = max_seq_len
         self.rope_theta = rope_theta
+        self.rope_scale = rope_scale
         self.approx_trigo = approx_trigo
 
         self.register_buffer(
@@ -176,8 +181,12 @@ class HelionRopeEncoding(nn.Module):
 
     def reset_non_persistent_buffers(self) -> None:
         device = self.freqs.device
-        idx = torch.arange(0, self.dim, 2, dtype=torch.float32, device=device)
-        inv_freq = 1.0 / (self.rope_theta ** (idx / self.dim))
+        inv_freq = build_rope_inv_freq(
+            dim=self.dim,
+            rope_theta=self.rope_theta,
+            device=device,
+            rope_scale=self.rope_scale,
+        )
         self.freqs.copy_(inv_freq)
 
     def _flatten_pos(

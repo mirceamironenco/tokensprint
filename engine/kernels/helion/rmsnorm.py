@@ -5,9 +5,10 @@ import torch
 try:
     import helion
     import helion.language as hl
-except ModuleNotFoundError:
-    helion = None
-    hl = None
+except ImportError:
+    _has_helion_installed_ = False
+else:
+    _has_helion_installed_ = True
 
 
 def _missing_helion_error() -> ModuleNotFoundError:
@@ -17,7 +18,7 @@ def _missing_helion_error() -> ModuleNotFoundError:
     )
 
 
-if helion is not None:
+if _has_helion_installed_:
 
     @helion.kernel(autotune_effort="none")
     def rmsnorm_kernel(

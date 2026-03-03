@@ -65,18 +65,19 @@ class Sequence:
         if not token_ids:
             raise ValueError("token_ids must be non-empty.")
 
+        self.token_ids = copy(token_ids)
+        self.temperature = sampling_params.temperature
+        self.max_tokens = sampling_params.max_tokens
+        self.ignore_eos = sampling_params.ignore_eos
+
         self.seq_id = next(Sequence.counter)
         self.status = SequenceStatus.WAITING
-        self.token_ids = copy(token_ids)
         self.last_token = token_ids[-1]
         self.num_tokens = len(self.token_ids)
         self.num_prompt_tokens = len(token_ids)
         self.num_cached_tokens = 0
         self.num_new_tokens = 0
         self.block_table = []
-        self.temperature = sampling_params.temperature
-        self.max_tokens = sampling_params.max_tokens
-        self.ignore_eos = sampling_params.ignore_eos
 
     def __len__(self) -> int:
         return self.num_tokens
@@ -89,6 +90,25 @@ class Sequence:
 
     def __getitem__(self, key: int | slice) -> int | list[int]:
         return self.token_ids[key]
+
+    def append_token(self, token_id: int) -> None:
+        """Appends one token and updates sequence bookkeeping.
+
+        Args:
+            token_id: Token ID to append.
+
+        Raises:
+            RuntimeError: If num_tokens diverges from len(token_ids).
+        """
+        self.token_ids.append(token_id)
+        self.last_token = token_id
+        self.num_tokens += 1
+
+        if self.num_tokens != len(self.token_ids):
+            raise RuntimeError(
+                "Inconsistent token count: expected num_tokens to equal "
+                f"len(token_ids), got {self.num_tokens} and {len(self.token_ids)}."
+            )
 
     @property
     def is_finished(self) -> bool:
@@ -201,24 +221,6 @@ class Sequence:
         return self.token_ids[
             block_index * self.block_size : (block_index + 1) * self.block_size
         ]
-
-    def append_token(self, token_id: int) -> None:
-        """Appends one token and updates sequence bookkeeping.
-
-        Args:
-            token_id: Token ID to append.
-
-        Raises:
-            RuntimeError: If num_tokens diverges from len(token_ids).
-        """
-        self.token_ids.append(token_id)
-        self.last_token = token_id
-        self.num_tokens += 1
-        if self.num_tokens != len(self.token_ids):
-            raise RuntimeError(
-                "Inconsistent token count: expected num_tokens to equal "
-                f"len(token_ids), got {self.num_tokens} and {len(self.token_ids)}."
-            )
 
     def __getstate__(
         self,

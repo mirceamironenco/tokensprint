@@ -1,15 +1,89 @@
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+
 import torch
 import torch.nn as nn
+
+
+@dataclass(kw_only=True)
+class LLaMARoPEScaleConfig:
+    """
+    Frequency scaling config for LLaMA-style RoPE extension.
+    """
+
+    factor: float = 8.0
+    frequency_factors: tuple[float, float] = (1.0, 4.0)
+    original_context_length: int = 8192
+
+
+def build_rope_inv_freq(
+    *,
+    dim: int,
+    rope_theta: float,
+    device: torch.device,
+    rope_scale: LLaMARoPEScaleConfig | None = None,
+) -> torch.Tensor:
+    idx = torch.arange(0, dim, step=2, dtype=torch.float32, device=device)
+    inv_freq = 1.0 / (rope_theta ** (idx / dim))
+
+    if rope_scale is None or device.type == "meta":
+        return inv_freq
+
+    if rope_scale.factor <= 0.0:
+        raise ValueError(f"rope_scale.factor must be > 0, got {rope_scale.factor}.")
+
+    if rope_scale.original_context_length <= 0:
+        raise ValueError(
+            "rope_scale.original_context_length must be > 0, "
+            f"got {rope_scale.original_context_length}."
+        )
+
+    low_freq_factor, high_freq_factor = rope_scale.frequency_factors
+    if high_freq_factor <= low_freq_factor:
+        raise ValueError(
+            "rope_scale.frequency_factors must satisfy high > low, "
+            f"got {rope_scale.frequency_factors}."
+        )
+
+    old_context = float(rope_scale.original_context_length)
+    low_freq_wavelen = old_context / low_freq_factor
+    high_freq_wavelen = old_context / high_freq_factor
+
+    wavelen = (2.0 * math.pi) / inv_freq
+
+    smooth = (old_context / wavelen - low_freq_factor) / (
+        high_freq_factor - low_freq_factor
+    )
+
+    scaled = inv_freq / rope_scale.factor
+    smooth_scaled = (1.0 - smooth) * scaled + smooth * inv_freq
+
+    inv_freq = torch.where(
+        wavelen < high_freq_wavelen,
+        inv_freq,
+        torch.where(wavelen > low_freq_wavelen, scaled, smooth_scaled),
+    )
+
+    return inv_freq
 
 
 class RopeEncoding(nn.Module):
     freqs: torch.Tensor
 
-    def __init__(self, dim: int, max_seq_len: int, rope_theta: float = 10000.0) -> None:
+    def __init__(
+        self,
+        dim: int,
+        max_seq_len: int,
+        rope_theta: float = 10000.0,
+        rope_scale: LLaMARoPEScaleConfig | None = None,
+    ) -> None:
         super().__init__()
         self.dim = dim
         self.max_seq_len = max_seq_len
         self.rope_theta = rope_theta
+        self.rope_scale = rope_scale
 
         self.register_buffer(
             "freqs",
@@ -22,11 +96,15 @@ class RopeEncoding(nn.Module):
 
     def reset_non_persistent_buffers(self) -> None:
         device = self.freqs.device
-        idx = torch.arange(0, self.dim, 2, dtype=torch.float32, device=device)
-        freqs = 1.0 / (self.rope_theta ** (idx / self.dim))
-        positions = torch.arange(self.max_seq_len, device=device)
+        inv_freq = build_rope_inv_freq(
+            dim=self.dim,
+            rope_theta=self.rope_theta,
+            device=device,
+            rope_scale=self.rope_scale,
+        )
+        positions = torch.arange(self.max_seq_len, device=device, dtype=torch.float32)
 
-        freqs = torch.outer(positions, freqs)
+        freqs = torch.outer(positions, inv_freq)
         freqs = torch.cat([freqs, freqs], dim=-1)
         out_freqs = torch.cat([freqs.cos(), freqs.sin()], dim=-1)
 

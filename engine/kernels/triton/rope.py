@@ -3,6 +3,8 @@ import torch.nn as nn
 import triton
 import triton.language as tl
 
+from engine.nn.rope import LLaMARoPEScaleConfig, build_rope_inv_freq
+
 
 @triton.jit
 def rope_kernel(
@@ -131,6 +133,7 @@ class TritonRopeEncoding(nn.Module):
         dim: int,
         max_seq_len: int,
         rope_theta: float = 10000.0,
+        rope_scale: LLaMARoPEScaleConfig | None = None,
         approx_trigo: bool = False,
     ) -> None:
         super().__init__()
@@ -140,6 +143,7 @@ class TritonRopeEncoding(nn.Module):
         self.dim = dim
         self.max_seq_len = max_seq_len
         self.rope_theta = rope_theta
+        self.rope_scale = rope_scale
         self.approx_trigo = approx_trigo
 
         self.register_buffer(
@@ -153,8 +157,12 @@ class TritonRopeEncoding(nn.Module):
 
     def reset_non_persistent_buffers(self) -> None:
         device = self.freqs.device
-        idx = torch.arange(0, self.dim, 2, dtype=torch.float32, device=device)
-        inv_freq = 1.0 / (self.rope_theta ** (idx / self.dim))
+        inv_freq = build_rope_inv_freq(
+            dim=self.dim,
+            rope_theta=self.rope_theta,
+            device=device,
+            rope_scale=self.rope_scale,
+        )
         self.freqs.copy_(inv_freq)
 
     def _flatten_pos(

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from collections import deque
 import logging
+from collections import deque
 
 from engine.generation.block_manager import BlockManager
 from engine.generation.config import Config
@@ -28,7 +28,7 @@ class Scheduler:
     # Ordered list of currently running sequences.
     running: list[Sequence]
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config) -> None:
         self.enable_chunked = config.chunked_prefill
         self.max_model_len = config.max_model_len
         self.max_num_seqs = config.max_num_seqs
@@ -147,17 +147,20 @@ class Scheduler:
                     break
 
                 seq.num_new_tokens = num_new_tokens
+
                 self.block_manager.allocate(seq)
 
                 expected_cached_tokens = (
                     num_new_computed_tokens_in_free + num_new_computed_tokens_in_used
                 )
+
                 if seq.num_cached_tokens != expected_cached_tokens:
                     raise RuntimeError(
                         "Cached token count mismatch after allocate for sequence "
                         f"{seq.seq_id}: expected {expected_cached_tokens}, "
                         f"got {seq.num_cached_tokens}."
                     )
+
                 token_budget -= num_new_tokens
                 seq.status = SequenceStatus.RUNNING
                 self.waiting.popleft()
@@ -188,6 +191,7 @@ class Scheduler:
         for seq_index, token_id in zip(seq_need_compute_logits, token_ids):
             seq = seqs[seq_index]
             seq.append_token(token_id)
+
             if (
                 (not seq.ignore_eos and token_id == self.eos)
                 or seq.num_completion_tokens == seq.max_tokens

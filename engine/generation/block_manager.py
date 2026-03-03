@@ -1,3 +1,4 @@
+import math
 from collections import deque
 
 import numpy as np
@@ -63,7 +64,7 @@ class BlockManager:
 
     def __init__(self, num_blocks: int, block_size: int):
         self.block_size = block_size
-        self.blocks = [Block(i) for i in range(num_blocks)]
+        self.blocks = [Block(block_id) for block_id in range(num_blocks)]
         self.hash_to_block_id = dict()
         self.free_block_ids = deque(range(num_blocks))
         self.used_block_ids = set()
@@ -83,9 +84,12 @@ class BlockManager:
             A 64-bit integer digest for the current block content and prefix.
         """
         h = xxhash.xxh64()
+
         if prefix != -1:
             h.update(prefix.to_bytes(8, "little"))
+
         h.update(np.array(token_ids).tobytes())
+
         return h.intdigest()
 
     def _allocate_block(self, block_id: int) -> Block:
@@ -103,6 +107,7 @@ class BlockManager:
             The allocated block object.
         """
         block = self.blocks[block_id]
+
         if block.ref_count != 0:
             raise RuntimeError(
                 f"Cannot allocate block {block_id}: expected ref_count == 0, "
@@ -176,7 +181,7 @@ class BlockManager:
                 h = -1
                 break
 
-            h = self.compute_hash(token_ids, h)
+            h = self.compute_hash(token_ids, prefix=h)
 
             # Cache miss boundary: keep the last block in new_tokens.
             if logical_block_index == seq.num_blocks - 1:
@@ -190,6 +195,7 @@ class BlockManager:
 
             # Cache hit.
             seq.num_cached_tokens += self.block_size
+
             if block_id in self.used_block_ids:
                 block = self.blocks[block_id]
                 block.ref_count += 1
@@ -197,6 +203,7 @@ class BlockManager:
                 block = self._allocate_block(block_id)
 
             block.update(h, token_ids)
+
             self.hash_to_block_id[h] = block_id
 
             seq.block_table.append(block_id)
@@ -302,9 +309,12 @@ class BlockManager:
         if tail_block_capacity == self.block_size:
             tail_block_capacity = 0
 
-        blocks_needed = (
-            num_new_tokens - tail_block_capacity + self.block_size - 1
-        ) // self.block_size
+        if tail_block_capacity >= num_new_tokens:
+            return True
+
+        blocks_needed = math.ceil(
+            (num_new_tokens - tail_block_capacity) / self.block_size
+        )
 
         if blocks_needed <= len(self.free_block_ids):
             return True
@@ -338,9 +348,11 @@ class BlockManager:
                 token_start_index + self.block_size,
                 seq.num_cached_tokens + seq.num_new_tokens,
             )
+
             token_ids = seq[token_start_index:token_end_index]
 
             logical_block_index = token_start_index // self.block_size
+
             current_block_id = (
                 seq.block_table[logical_block_index]
                 if logical_block_index < len(seq.block_table)
@@ -360,11 +372,12 @@ class BlockManager:
                 if token_start_index >= self.block_size
                 else -1
             )
+
             prefix_hash = (
                 self.blocks[previous_block_id].hash if previous_block_id != -1 else -1
             )
 
-            h = self.compute_hash(token_ids, prefix_hash)
+            h = self.compute_hash(token_ids, prefix=prefix_hash)
 
             if current_block_id == -1:
                 new_block_id = self.free_block_ids[0]
@@ -430,20 +443,21 @@ class BlockManager:
         for logical_block_index in range(seq.num_blocks):
             token_ids = seq.block(logical_block_index)
 
-            # Don't cache partial blocks.
-            if len(token_ids) != self.block_size:
-                rolling_hash = -1
-            else:
-                rolling_hash = self.compute_hash(token_ids, rolling_hash)
+            if not seen_cache_miss_boundary:
+                # Don't cache partial blocks.
+                if len(token_ids) != self.block_size:
+                    rolling_hash = -1
+                else:
+                    rolling_hash = self.compute_hash(token_ids, rolling_hash)
 
-            cached_block_id = self.hash_to_block_id.get(rolling_hash, -1)
+                cached_block_id = self.hash_to_block_id.get(rolling_hash, -1)
 
-            if (
-                cached_block_id == -1
-                or self.blocks[cached_block_id].token_ids != token_ids
-                or logical_block_index == seq.num_blocks - 1
-            ):
-                seen_cache_miss_boundary = True
+                if (
+                    cached_block_id == -1
+                    or self.blocks[cached_block_id].token_ids != token_ids
+                    or logical_block_index == seq.num_blocks - 1
+                ):
+                    seen_cache_miss_boundary = True
 
             if seen_cache_miss_boundary:
                 num_new_tokens += len(token_ids)

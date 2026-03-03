@@ -1,8 +1,10 @@
+from dataclasses import dataclass
+from typing import Literal
+
 import torch
 import torch.nn as nn
 import triton
 import triton.language as tl
-from typing import Literal
 
 from engine.nn.base_layers import Linear, RMSNorm
 from engine.nn.rope import RopeEncoding
@@ -70,6 +72,18 @@ def store_kvcache(
     )
 
 
+@dataclass(kw_only=True)
+class AttentionConfig:
+    model_dim: int
+    num_heads: int
+    num_kv_heads: int | None = None
+    head_dim: int | None = None
+    bias: bool = False
+    output_bias: bool = False
+    qk_norm: bool = False
+    qk_norm_eps: float = 1e-6
+
+
 class Attention(nn.Module):
     pos_encoder: RopeEncoding
     sdpa: SDPA
@@ -80,60 +94,59 @@ class Attention(nn.Module):
 
     def __init__(
         self,
-        model_dim: int,
-        num_heads: int,
+        config: AttentionConfig,
+        *,
         pos_encoder: RopeEncoding,
         sdpa: SDPA,
-        num_kv_heads: int | None = None,
-        head_dim: int | None = None,
-        bias: bool = False,
-        output_bias: bool = False,
-        qk_norm: bool = False,
-        qk_norm_eps: float = 1e-6,
         norm_impl: Literal["torch", "triton", "helion"] = "torch",
         norm_op: RMSNorm.Op | None = None,
     ) -> None:
         super().__init__()
-        if model_dim % num_heads != 0:
+        if config.model_dim % config.num_heads != 0:
             raise ValueError(
                 "model_dim must be divisible by num_heads, "
-                f"got model_dim={model_dim} and num_heads={num_heads}."
+                f"got model_dim={config.model_dim} and num_heads={config.num_heads}."
             )
-        if head_dim is not None and model_dim % head_dim != 0:
+        if config.head_dim is not None and config.model_dim % config.head_dim != 0:
             raise ValueError(
                 "model_dim must be divisible by head_dim when head_dim is provided, "
-                f"got model_dim={model_dim} and head_dim={head_dim}."
+                f"got model_dim={config.model_dim} and head_dim={config.head_dim}."
             )
 
-        self.model_dim = model_dim
-        self.head_dim = head_dim or (model_dim // num_heads)
-        self.num_heads = num_heads
-        self.num_kv_heads = num_kv_heads or num_heads
+        self.config = config
+        self.model_dim = config.model_dim
+        self.head_dim = config.head_dim or (config.model_dim // config.num_heads)
+        self.num_heads = config.num_heads
+        self.num_kv_heads = config.num_kv_heads or config.num_heads
 
-        self.q_proj = Linear(self.model_dim, self.num_heads * self.head_dim, bias=bias)
+        self.q_proj = Linear(
+            self.model_dim, self.num_heads * self.head_dim, bias=config.bias
+        )
         self.k_proj = Linear(
-            self.model_dim, self.num_kv_heads * self.head_dim, bias=bias
+            self.model_dim, self.num_kv_heads * self.head_dim, bias=config.bias
         )
         self.v_proj = Linear(
-            self.model_dim, self.num_kv_heads * self.head_dim, bias=bias
+            self.model_dim, self.num_kv_heads * self.head_dim, bias=config.bias
         )
         self.o_proj = Linear(
-            self.num_heads * self.head_dim, self.model_dim, bias=output_bias
+            self.num_heads * self.head_dim,
+            self.model_dim,
+            bias=config.output_bias,
         )
 
         self.sdpa = sdpa
         self.pos_encoder = pos_encoder
 
-        if qk_norm:
+        if config.qk_norm:
             self.q_norm = RMSNorm(
                 self.head_dim,
-                eps=qk_norm_eps,
+                eps=config.qk_norm_eps,
                 impl=norm_impl,
                 norm_op=norm_op,
             )
             self.k_norm = RMSNorm(
                 self.head_dim,
-                eps=qk_norm_eps,
+                eps=config.qk_norm_eps,
                 impl=norm_impl,
                 norm_op=norm_op,
             )
@@ -171,7 +184,7 @@ class Attention(nn.Module):
         q, k = self.pos_encoder(q, k, input_pos)
 
         if seqinfo is not None:
-            if self.k_cache.numel():
+            if self.k_cache.numel() and self.v_cache.numel():
                 store_kvcache(k, v, self.k_cache, self.v_cache, seqinfo.slot_mapping)
 
             if seqinfo.block_tables is not None:

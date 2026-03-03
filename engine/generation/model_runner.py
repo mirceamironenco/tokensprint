@@ -3,14 +3,14 @@ from bisect import bisect_left
 import torch
 
 from engine.generation.config import Config
-from engine.model import Transformer
 from engine.generation.sampler import Sampler
+from engine.model import Transformer
 from engine.sequence import Sequence, SequenceInfo
 from engine.utils import to_tensor
 
 
 class ModelRunner:
-    allocated_kv_cache: torch.Tensor
+    kv_caches: list[torch.Tensor]
     graph_bs: list[int]
     graph_pool: object | None
     graphs: dict[int, torch.cuda.CUDAGraph]
@@ -22,7 +22,7 @@ class ModelRunner:
         self.rank = rank
         self.model = model
         self.sampler = Sampler()
-        self.allocated_kv_cache = torch.empty(0)
+        self.kv_caches = []
 
         self.graph_bs = []
         self.graph_pool = None
@@ -188,7 +188,17 @@ class ModelRunner:
             return self._run_model_cudagraph(input_ids, positions, seqinfo)
 
         hidden = self.model.decode(input_ids, input_pos=positions, seqinfo=seqinfo)
+
         return self.model.project_inference(hidden, seqinfo=seqinfo)
+
+    def run(self, seqs: list[Sequence]) -> tuple[list[int], list[int]]:
+        input_ids, positions, seqinfo = self.prepare_model_input(seqs)
+        temperatures = self.prepare_sample(seqs, seqinfo)
+        logits = self.run_model(input_ids, positions, seqinfo)
+        sampled = self.sampler(logits, temperatures)
+        token_ids = sampled.tolist()
+        seq_need_compute_logits = seqinfo.seq_need_compute_logits.tolist()
+        return token_ids, seq_need_compute_logits
 
     def _can_use_cudagraph(
         self, input_ids: torch.Tensor, seqinfo: SequenceInfo
@@ -217,7 +227,9 @@ class ModelRunner:
         if seqinfo.seq_need_compute_logits.numel() != bs:
             return False
 
-        if seqinfo.block_tables.size(1) > self.graph_vars[graph_bs]["block_tables"].size(1):
+        if seqinfo.block_tables.size(1) > self.graph_vars[graph_bs][
+            "block_tables"
+        ].size(1):
             return False
 
         return True
@@ -250,9 +262,7 @@ class ModelRunner:
 
         # Keep inactive lanes valid when replaying a larger bucket.
         graph_vars["context_lens"].fill_(1)
-        graph_vars["context_lens"][:bs].copy_(
-            seqinfo.context_lens
-        )
+        graph_vars["context_lens"][:bs].copy_(seqinfo.context_lens)
 
         graph_vars["cu_seqlens_k"][0] = 0
         torch.cumsum(
@@ -274,15 +284,6 @@ class ModelRunner:
 
         hidden = graph_vars["hidden"][:bs]
         return self.model.project_inference(hidden, seqinfo=seqinfo)
-
-    def run(self, seqs: list[Sequence]) -> tuple[list[int], list[int]]:
-        input_ids, positions, seqinfo = self.prepare_model_input(seqs)
-        temperatures = self.prepare_sample(seqs, seqinfo)
-        logits = self.run_model(input_ids, positions, seqinfo)
-        sampled = self.sampler(logits, temperatures)
-        token_ids = sampled.tolist()
-        seq_need_compute_logits = seqinfo.seq_need_compute_logits.tolist()
-        return token_ids, seq_need_compute_logits
 
     def warmup_model(self) -> None:
         torch.cuda.empty_cache()
@@ -335,9 +336,7 @@ class ModelRunner:
 
             input_ids = torch.zeros(bs, dtype=torch.int64, device=cuda_device)
             positions = torch.zeros(bs, dtype=torch.int64, device=cuda_device)
-            slot_mapping = torch.full(
-                (bs,), -1, dtype=torch.int32, device=cuda_device
-            )
+            slot_mapping = torch.full((bs,), -1, dtype=torch.int32, device=cuda_device)
             context_lens = torch.ones(bs, dtype=torch.int32, device=cuda_device)
             block_tables = torch.zeros(
                 (bs, max_num_blocks), dtype=torch.int32, device=cuda_device
@@ -418,19 +417,21 @@ class ModelRunner:
                 f"bytes_per_block={bytes_per_block}, available_mem={int(available_mem)}."
             )
 
-        self.allocated_kv_cache = torch.zeros(
-            2,
-            len(self.model.layers),
-            self.config.num_kvcache_blocks,
-            self.block_size,
-            self.model.num_kv_heads,
-            self.model.head_dim,
-            dtype=self.config.dtype,
-            device=f"cuda:{self.rank}",
-        )
+        self.kv_caches = [
+            torch.zeros(
+                2,
+                self.config.num_kvcache_blocks,
+                self.block_size,
+                self.model.num_kv_heads,
+                self.model.head_dim,
+                dtype=self.config.dtype,
+                device=f"cuda:{self.rank}",
+            )
+            for _ in self.model.layers
+        ]
 
-        for layer_index, layer in enumerate(self.model.layers):
+        for layer, kv_cache in zip(self.model.layers, self.kv_caches, strict=True):
             layer.attn_layer.bind_kv_cache(
-                self.allocated_kv_cache[0, layer_index],
-                self.allocated_kv_cache[1, layer_index],
+                kv_cache[0],
+                kv_cache[1],
             )

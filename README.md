@@ -8,7 +8,7 @@ Small vllm-style inference engine.
 - scheduler-driven prefill/decode steps
 - FlashAttention-based attention path
 - optional Triton/Helion kernel paths (RoPE, RMSNorm)
-- benchmark harness for mini backend vs vLLM
+- benchmark harness for tokensprint backend vs vLLM
 
 ## Requirements
 - Python `>=3.12`
@@ -30,22 +30,40 @@ uv run run.py \
   --temperature 0.8
 ```
 
-On first run, model/tokenizer artifacts are downloaded into `./local_data`.
-
 ## Supported model configs
-Current `run.py` presets:
+Models are provided by the runtime registry. List all currently registered models:
+```bash
+uv run model_registry.py
+```
+
+Currently registered:
 - `qwen/qwen2.5-7b-instruct`
 - `qwen/qwen3-0.6b`
 - `qwen/qwen2.5-1.5b`
-- more in progress
+- `meta-llama/llama-3-8b`
+- `meta-llama/llama-3.1-8b`
+- `meta-llama/llama-3.1-8b-instruct`
+- `meta-llama/llama-3.2-3b`
+- `meta-llama/llama-3.2-3b-instruct`
+- `meta-llama/llama-3.2-1b`
+- `meta-llama/llama-3.2-1b-instruct`
+
+Both short names and repo-style names are accepted, for example:
+- `qwen3-0.6b` and `qwen/qwen3-0.6b`
+- `llama-3.2-1b` and `meta-llama/llama-3.2-1b`
 
 ## Benchmark
-Mini backend:
+tokensprint backend:
 ```bash
-uv run benchmark.py --backend mini --use-tqdm False
+uv run benchmark.py --backend tokensprint --use-tqdm False
 ```
 
-vLLM backend (requires extra):
+vLLM backend (requires installing optional dependencies first):
+```bash
+uv sync --extra vllm
+```
+
+Then run:
 ```bash
 uv run benchmark.py --backend vllm --use-tqdm False
 ```
@@ -56,7 +74,10 @@ uv run benchmark.py --backend both --use-tqdm False --vllm-async-scheduling Fals
 ```
 
 ## Layout
-- `engine/generation`: config, scheduler, block manager, model runner, engine API
-- `engine/kernels`: backend subpackages (`triton/`, `helion/`) with shared kernels.
-- `run.py`: simple generation entry point
-- `benchmark.py`: performance comparison harness
+- `engine/generation`: scheduler-driven inference flow (`LLMEngine`, scheduler, block manager, model runner).
+- `engine/models`: model registry/runtime, family arch definitions (`qwen/`, `llama/`), HF checkpoint converters, model build/load APIs.
+- `engine/nn`: transformer modules (attention, FFN, blocks, RoPE reference implementation).
+- `engine/kernels`: backend kernels (`triton/`, `helion/`) for RoPE and RMSNorm.
+- `run.py`: single-prompt generation entrypoint.
+- `benchmark.py`: throughput comparison harness (tokensprint backend vs vLLM).
+- `model_registry.py`: prints all registered models grouped by family.
